@@ -5,8 +5,10 @@
 from __future__ import unicode_literals
 
 import datetime
+import re
 
 from django.db.models import fields, lookups
+from django.utils import timezone
 
 
 class LdapLookup(lookups.Lookup):
@@ -97,6 +99,26 @@ class InLookup(LdapLookup):
 
 class ListContainsLookup(ExactLookup):
     lookup_name = 'contains'
+
+
+class BaseDateTimeLookup(object):
+    def get_db_prep_lookup(self, value, connection):
+        return (
+            '%s',
+            [self.lhs.output_field.get_db_prep_value(value, connection, prepared=True)[0].decode(connection.charset)],
+        )
+
+
+class DateTimeExactLookup(BaseDateTimeLookup, ExactLookup):
+    pass
+
+
+class DateTimeGteLookup(BaseDateTimeLookup, GteLookup):
+    pass
+
+
+class DateTimeLteLookup(BaseDateTimeLookup, LteLookup):
+    pass
 
 
 class CharField(fields.CharField):
@@ -242,3 +264,78 @@ class DateField(fields.DateField):
 
 
 DateField.register_lookup(ExactLookup)
+
+
+LDAP_DATETIME_RE = re.compile(
+    r'(?P<year>\d{4})'
+    r'(?P<month>\d{2})'
+    r'(?P<day>\d{2})'
+    r'(?P<hour>\d{2})'
+    r'(?P<minute>\d{2})?'
+    r'(?P<second>\d{2})?'
+    r'(?:[.,](?P<microsecond>\d+))?'
+    r'(?P<tzinfo>Z|[+-]\d{2}(?:\d{2})?)'
+    r'$'
+)
+
+
+LDAP_DATE_FORMAT = '%Y%m%d%H%M%S.%fZ'
+
+
+def datetime_from_ldap(value):
+    """Convert a LDAP-style datetime to a Python aware object.
+
+    See https://tools.ietf.org/html/rfc4517#section-3.3.13 for details.
+
+    Args:
+        value (str): the datetime to parse
+    """
+    if not value:
+        return None
+    match = LDAP_DATETIME_RE.match(value)
+    if not match:
+        return None
+    groups = match.groupdict()
+    if groups['microsecond']:
+        groups['microsecond'] = groups['microsecond'].ljust(6, '0')[:6]
+    tzinfo = groups.pop('tzinfo')
+    if tzinfo == 'Z':
+        tzinfo = timezone.utc
+    else:
+        offset_mins = int(tzinfo[-2:]) if len(tzinfo) == 5 else 0
+        offset = 60 * int(tzinfo[1:3]) + offset_mins
+        if tzinfo[0] == '-':
+            offset = - offset
+        tzinfo = timezone.get_fixed_timezone(offset)
+    kwargs = {k: int(v) for k, v in groups.items() if v is not None}
+    kwargs['tzinfo'] = tzinfo
+    return datetime.datetime(**kwargs)
+
+
+class DateTimeField(fields.DateTimeField):
+    """
+    A file containing a UTC timestamp, in uTCTimeSyntax syntax.
+
+    That syntax is ``YYYYmmddHH[MM[SS[.ff](Z|+XX[YY]|-XX[YY])``.
+    """
+
+    def from_ldap(self, value, connection):
+        if len(value) == 0:
+            return None
+        return datetime_from_ldap(value[0].decode(connection.charset))
+
+    def get_db_prep_value(self, value, connection, prepared=False):
+        if not value:
+            return None
+        if not isinstance(value, datetime.date) \
+                and not isinstance(value, datetime.datetime):
+            raise ValueError(
+                'DateField can be only set to a datetime.date instance')
+
+        value = timezone.utc.normalize(value)
+        return [value.strftime(LDAP_DATE_FORMAT).encode(connection.charset)]
+
+
+DateTimeField.register_lookup(DateTimeExactLookup)
+DateTimeField.register_lookup(DateTimeLteLookup)
+DateTimeField.register_lookup(DateTimeGteLookup)

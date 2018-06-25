@@ -5,7 +5,7 @@
 from __future__ import unicode_literals
 
 import ldapdb.models
-from ldapdb.models.fields import CharField, ImageField, IntegerField, ListField
+from ldapdb.models.fields import CharField, ImageField, IntegerField, ListField, DateTimeField
 
 
 class LdapUser(ldapdb.models.Model):
@@ -15,6 +15,7 @@ class LdapUser(ldapdb.models.Model):
     # LDAP meta-data
     base_dn = "ou=people,dc=example,dc=org"
     object_classes = ['posixAccount', 'shadowAccount', 'inetOrgPerson']
+    last_modified = DateTimeField(db_column='modifyTimestamp')
 
     # inetOrgPerson
     first_name = CharField(db_column='givenName', verbose_name="Prime name")

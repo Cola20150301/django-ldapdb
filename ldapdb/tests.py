@@ -5,16 +5,25 @@
 
 from __future__ import unicode_literals
 
+import datetime
+
 from django.db import connections
 from django.db.models import expressions
 from django.db.models.sql import query as django_query
 from django.db.models.sql.where import AND, OR, WhereNode
 from django.test import TestCase
+from django.utils import timezone
 
 from ldapdb import escape_ldap_filter, models
 from ldapdb.backends.ldap import compiler as ldapdb_compiler
-from ldapdb.models.fields import (CharField, DateField, FloatField,
-                                  IntegerField, ListField)
+from ldapdb.models.fields import (CharField, DateField, DateTimeField,
+                                  FloatField, IntegerField, ListField)
+from ldapdb.models.fields import datetime_from_ldap
+
+
+UTC = timezone.utc
+UTC_PLUS_ONE = timezone.get_fixed_timezone(60)
+UTC_MINUS_2_HALF = timezone.get_fixed_timezone(-150)
 
 
 class FakeModel(models.Model):
@@ -24,6 +33,32 @@ class FakeModel(models.Model):
     base_dn = 'ou=test,dc=example,dc=org'
     object_classes = ['inetOrgPerson']
     name = CharField(db_column='cn')
+
+
+class DateTimeTests(TestCase):
+    CONVERSIONS = {
+        '': None,
+        '20180102030405.067874Z': datetime.datetime(2018, 1, 2, 3, 4, 5, 67874, tzinfo=UTC),
+        # Sub-microsecond is ignored by Python
+        '20180102030405.067874846Z': datetime.datetime(2018, 1, 2, 3, 4, 5, 67874, tzinfo=UTC),
+        # Sub-hour precision is optional
+        '2018010203Z': datetime.datetime(2018, 1, 2, 3, tzinfo=UTC),
+        # Support UTC offsets
+        '201801020304+0100': datetime.datetime(2018, 1, 2, 3, 4, tzinfo=UTC_PLUS_ONE),
+        # Minutes are optional for UTC offsets
+        '201801020304+01': datetime.datetime(2018, 1, 2, 3, 4, tzinfo=UTC_PLUS_ONE),
+        # Check negative offsets
+        '201801020304-0230': datetime.datetime(2018, 1, 2, 3, 4, tzinfo=UTC_MINUS_2_HALF),
+    }
+
+    def test_conversions(self):
+        for raw, expected in sorted(self.CONVERSIONS.items()):
+            converted = datetime_from_ldap(raw)
+            self.assertEqual(
+                expected,
+                converted,
+                "Mismatch for %r: expected=%r, got=%r" % (raw, expected, converted),
+            )
 
 
 class WhereTestCase(TestCase):
@@ -143,6 +178,21 @@ class WhereTestCase(TestCase):
         where = WhereNode()
         where.add(self._build_lookup("birthday", 'exact', '2013-09-03', field=DateField), AND)
         self.assertEqual(self._where_as_ldap(where), "(birthday=2013-09-03)")
+
+    def test_datetime_field(self):
+        dt = datetime.datetime(2018, 6, 25, 20, 21, 22, tzinfo=UTC)
+
+        where = WhereNode()
+        where.add(self._build_lookup("modifyTimestamp", 'exact', dt, field=DateTimeField,), AND)
+        self.assertEqual(self._where_as_ldap(where), "(modifyTimestamp=20180625202122.000000Z)")
+
+        where = WhereNode()
+        where.add(self._build_lookup("modifyTimestamp", 'lte', dt, field=DateTimeField,), AND)
+        self.assertEqual(self._where_as_ldap(where), "(modifyTimestamp<=20180625202122.000000Z)")
+
+        where = WhereNode()
+        where.add(self._build_lookup("modifyTimestamp", 'gte', dt, field=DateTimeField,), AND)
+        self.assertEqual(self._where_as_ldap(where), "(modifyTimestamp>=20180625202122.000000Z)")
 
     def test_and(self):
         where = WhereNode()
